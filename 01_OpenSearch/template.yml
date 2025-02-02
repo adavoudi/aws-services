@@ -1,0 +1,71 @@
+Parameters:
+  DomainName:
+    Type: String
+    Description: The name of the Amazon OpenSearch Service domain
+    MinLength: 3
+    MaxLength: 28
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: must begin with a lowercase letter and contain only lowercase letters, numbers, and hyphens.
+  DomainInstanceType:
+    Type: String
+    Description: The instance type for the Amazon OpenSearch Service domain
+    Default: t3.small.search
+    AllowedValues:
+      - t2.small.search
+      - t3.small.search
+  MasterUserName:
+    Type: String
+    Description: The master user name for the Amazon OpenSearch Service domain
+  MasterUserPassword:
+    Type: String
+    Description: The master user password for the Amazon OpenSearch Service domain
+    NoEcho: true
+
+Resources:
+  OpenSearchDomain:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Ref DomainName
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+      ClusterConfig:
+        InstanceType: !Ref DomainInstanceType
+        InstanceCount: 1
+        DedicatedMasterEnabled: false
+        ZoneAwarenessEnabled: false
+        WarmEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp2
+        VolumeSize: 10
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: !Ref MasterUserName
+          MasterUserPassword: !Ref MasterUserPassword
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: "es:*"
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${DomainName}/*"
+
+Outputs:
+  OpenSearchDomainEndpoint:
+    Description: The endpoint of the Amazon OpenSearch Service domain
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+  OpenSearchDomainKibanaUrl:
+    Description: The Kibana URL of the Amazon OpenSearch Service domain
+    Value: !Sub "https://${OpenSearchDomain.DomainEndpoint}/_plugin/kibana/"
+   
+
+      
