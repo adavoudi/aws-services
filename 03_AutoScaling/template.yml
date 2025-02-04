@@ -1,0 +1,207 @@
+Parameters:
+  EC2InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: EC2 instance type
+  KeyName:
+    Type: String
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Default: MyMainKey
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Image ID
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  TargetCPUUtilization:
+    Type: Number
+    Default: 50
+    Description: Target CPU Utilization
+
+Resources:
+  # Security Resources
+  MyEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP and SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: '0.0.0.0/0'
+
+  # Compute Resources
+
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-LaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref EC2InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !GetAtt MyEC2SecurityGroup.GroupId
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        # Enable detailed monitoring
+        Monitoring:
+          Enabled: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: "AutoScaling-Test-Instance"
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash -xe
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<html><body><h1>Hello World</h1></body></html>" > /var/www/html/index.html
+
+            amazon-linux-extras install epel -y
+            yum install stress -y
+            yum install cpulimit -y
+
+            cat <<EOF > /bin/stress-cpu.py
+            import subprocess
+            import sys
+            import time
+
+            def limit_cpu(percent, seconds):
+                try:
+                    stress_process = subprocess.Popen(["stress", "--cpu", "1", "--quiet", "--timeout", str(seconds)])
+                    subprocess.Popen(["cpulimit", "-p", str(stress_process.pid), "-l", str(percent), "-i"])
+                    print(f"Stress PID {stress_process.pid}, CPU limited to {percent}% for {seconds} seconds.")
+                    stress_process.wait()
+                except KeyboardInterrupt:
+                    stress_process.terminate()
+                    stress_process.wait()
+                    print("Processes stopped.")
+
+            if __name__ == "__main__":
+                if len(sys.argv) != 3:
+                    print("Usage: python limit_cpu.py <cpu_percent> <seconds>")
+                    sys.exit(1)
+                try:
+                    percent = int(sys.argv[1])
+                    seconds = int(sys.argv[2])
+                    if percent < 1 or percent > 100:
+                        raise ValueError("CPU percent must be between 1 and 100.")
+                except ValueError:
+                    print("Error: CPU percent must be an integer between 1 and 100, and seconds must be a positive integer.")
+                    sys.exit(1)
+                limit_cpu(percent, seconds)
+            EOF
+
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+         - AttachRouteTable
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-Instance"
+          PropagateAtLaunch: true
+
+  CPUTargetTrackingScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: CPUTargetTrackingScalingPolicy
+      PolicyType: TargetTrackingScaling
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      TargetTrackingConfiguration:
+        TargetValue: !Ref TargetCPUUtilization
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  
+  # Networking Resources
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-VPC"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-IGW"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.10.0.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicSubnet"
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-RT"
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  AttachRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
